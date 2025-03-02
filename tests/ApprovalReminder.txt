@@ -1,0 +1,54 @@
+<?php
+
+namespace App\Console\Commands;
+
+use Illuminate\Console\Command;
+use App\Models\ApprovalInstance;
+use App\Services\ApprovalService;
+use Illuminate\Support\Carbon;
+
+class SendApprovalReminders extends Command
+{
+    protected $signature = 'approvals:send-reminders {--threshold=24}';
+    protected $description = 'Send reminders for pending approvals';
+
+    protected ApprovalService $approvalService;
+
+    public function __construct(ApprovalService $approvalService)
+    {
+        parent::__construct();
+        $this->approvalService = $approvalService;
+    }
+
+    public function handle(): void
+    {
+        $threshold = $this->option('threshold');
+        $thresholdDate = Carbon::now()->subHours($threshold);
+
+        $pendingApprovals = ApprovalInstance::query()
+            ->whereIn('status', ['pending', 'pending_cancellation'])
+            ->where('updated_at', '<=', $thresholdDate)
+            ->with(['approvalFlow', 'approvable'])
+            ->get();
+
+        $count = 0;
+
+        foreach ($pendingApprovals as $instance) {
+            $currentStep = $instance->currentStepConfig;
+            if (!$currentStep) continue;
+
+            $approvers = $this->approvalService->getApproversFromConfig($currentStep['approvers']);
+            
+            foreach ($approvers as $approver) {
+                $approver->notify(new \App\Notifications\ApprovalReminder(
+                    instance: $instance,
+                    stepName: $currentStep['name'],
+                    hoursElapsed: $threshold
+                ));
+                $count++;
+            }
+        }
+
+        $this->info("Sent {$count} approval reminders for approvals pending more than {$threshold} hours.");
+    }
+}
